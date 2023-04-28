@@ -216,3 +216,4 @@ fabric.properties
 *.log.*
 *.zip
 docker-compose.yaml
+discord_ids.csv
