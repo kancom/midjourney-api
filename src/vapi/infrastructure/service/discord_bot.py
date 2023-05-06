@@ -89,7 +89,7 @@ class Bot(Client):
         self._logger.debug(self._proxy)
         self._eviction_count = 0
         self.max_task_age = (
-            timedelta(minutes=5) if self._high_priority else timedelta(minutes=13)
+            timedelta(minutes=10) if self._high_priority else timedelta(minutes=13)
         )
 
     @property
