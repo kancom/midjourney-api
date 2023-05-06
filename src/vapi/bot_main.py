@@ -34,6 +34,7 @@ class FileChangeHandler(FileSystemEventHandler):
             for row in reader:
                 container = Bot.BotInitCont(
                     bot_id=row["id"],
+                    bot_pool=row.get("pool", "common"),
                     high_priority=row["high_priority"],
                     channel_id=row["channel_id"],
                     server_id=row["server_id"],
@@ -89,8 +90,12 @@ async def main(
         observer.join()
 
 
-if __name__ == "__main__":
+def run():
     container = Container()
     container.wire(modules=[__name__])
-    start_http_server(8000)
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    start_http_server(8000)
+    run()

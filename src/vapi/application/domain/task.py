@@ -20,13 +20,18 @@ class TaskDeliverable(BaseModel):
     filename: str
 
 
+class RouteLabel(BaseModel):
+    priority: Priority = Priority.Low
+    bot_id: Optional[int] = None
+    bot_pool: str
+
+
 class Task(BaseModel):
     uuid: uuid_pkg.UUID = Field(default_factory=uuid_pkg.uuid4)
-    priority: Priority = Priority.Low
+    route_label: RouteLabel
     command: Command
     params: Union[GenerateTask, VariationTask]
     status: Outcome = Outcome.New
     progress: Optional[int] = None
     deliverable: Optional[TaskDeliverable] = None
     discord_msg_id: Optional[int] = None
-    bot_id: Optional[int] = None

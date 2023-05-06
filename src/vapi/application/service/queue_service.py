@@ -2,15 +2,12 @@ import abc
 from typing import Optional
 from uuid import UUID
 
-from ..domain.task import Task
-from ..foundation import Priority
+from ..domain.task import RouteLabel, Task
 
 
 class IQueueService(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    async def get_next_task_id(
-        self, queue_priority: Priority, bot_id: Optional[int] = None
-    ) -> Optional[UUID]:
+    async def get_next_task_id(self, route_label: RouteLabel) -> Optional[UUID]:
         pass
 
     @abc.abstractmethod
@@ -26,13 +23,11 @@ class IQueueService(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    async def publish_task(
-        self, uid: UUID, queue_priority: Priority, bot_id: Optional[int] = None
-    ):
+    async def publish_task(self, uid: UUID, route_label: RouteLabel):
         pass
 
     @abc.abstractmethod
-    async def push_back_task_id(self, task_id: str, queue_priority: Priority):
+    async def push_back_task_id(self, task_id: str, route_label: RouteLabel):
         pass
 
     @abc.abstractmethod

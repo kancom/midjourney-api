@@ -1,4 +1,5 @@
-from .domain.task import GenerateTask, Task, TaskDeliverable, VariationTask
+from .domain.task import (GenerateTask, RouteLabel, Task, TaskDeliverable,
+                          VariationTask)
 from .foundation import (Command, ImagePosition, NotInCollection, Outcome,
                          Priority)
 from .service.queue_service import IQueueService
@@ -14,4 +15,5 @@ __all__ = [
     "VariationTask",
     "NotInCollection",
     "TaskDeliverable",
+    "RouteLabel",
 ]

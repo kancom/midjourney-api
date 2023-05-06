@@ -3,7 +3,7 @@ import uuid
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, HTTPException, status
 from vapi.application import (Command, GenerateTask, IQueueService, Outcome,
-                              Task, VariationTask)
+                              RouteLabel, Task, VariationTask)
 from vapi.application.foundation import NotInCollection
 from vapi.wiring import Container
 
@@ -30,15 +30,16 @@ async def make_set(
         )
     except NotInCollection:
         pass
+    route_label = RouteLabel(priority=request.priority, bot_pool=request.route_hint)
     task = Task(
         uuid=request.uuid,
+        route_label=route_label,
         command=Command.New,
         status=Outcome.New,
         params=GenerateTask(prompt=request.prompt),
-        priority=request.priority,
     )
     await queue_service.put_task(task)
-    await queue_service.publish_task(task.uuid, task.priority)
+    await queue_service.publish_task(task.uuid, route_label)
     return task.uuid
 
 
@@ -57,11 +58,11 @@ async def make_variation(
     task.status = Outcome.New
     task.params = VariationTask(position=request.position)
     task.progress = 0
-    task.priority = request.priority
+    task.route_label.priority = request.priority
     if task.deliverable is not None:
         task.deliverable.url = None
     await queue_service.put_task(task)
-    await queue_service.publish_task(task.uuid, task.priority, task.bot_id)
+    await queue_service.publish_task(task.uuid, task.route_label)
     return task.uuid
 
 

@@ -13,7 +13,8 @@ from discord.message import Message
 from loguru import logger
 from pydantic import BaseModel
 from vapi.application import (Command, IQueueService, Outcome, Priority,
-                              TaskDeliverable)
+                              RouteLabel, TaskDeliverable)
+from vapi.application.domain.task import GenerateTask, VariationTask
 
 logger.remove()
 fmt = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> {extra[human]} - <level>{message}</level>"
@@ -44,10 +45,11 @@ class Bot(Client):
     progress_str = re.compile(r"\(([0-9]+)%\)")
     mode_str = re.compile(r"\(([a-z]+), ([a-z]+)\)")
     clean_str = re.compile(r"[^A-Za-z]")
-    max_task_age = timedelta(minutes=10)
+    max_evictions = 5
 
     class BotInitCont(BaseModel):
         bot_id: int
+        bot_pool: str
         human_name: str
         high_priority: bool = False
         channel_id: str
@@ -70,6 +72,7 @@ class Bot(Client):
     ) -> None:
         super().__init__(intents=Intents.all(), **options)
         self._bot_id = init_cont.bot_id
+        self._bot_pool = init_cont.bot_pool
         self._human_name = init_cont.human_name
         self._high_priority = init_cont.high_priority
         self._channel_id = init_cont.channel_id
@@ -84,6 +87,10 @@ class Bot(Client):
         self._current_tasks: Dict[UUID, datetime] = {}
         self._logger = logger.bind(human=self._human_name)
         self._logger.debug(self._proxy)
+        self._eviction_count = 0
+        self.max_task_age = (
+            timedelta(minutes=5) if self._high_priority else timedelta(minutes=13)
+        )
 
     @property
     def identity(self) -> str:
@@ -100,18 +107,43 @@ class Bot(Client):
                 )
                 if len(self._current_tasks) >= self.capacity[self._high_priority]:
                     now = datetime.utcnow()
+                    ev = [
+                        k
+                        for k, v in self._current_tasks.items()
+                        if now - v > self.max_task_age
+                    ]
+                    if len(ev) and not self._high_priority:
+                        self.max_task_age = timedelta(minutes=10)
+                        self._eviction_count += 1
+                        self._logger.warning(ev)
+                    for t in ev:
+                        cnt.REQ_BY_METHOD_ERROR.labels(
+                            self._human_name, "unknown", "TaskEviction"
+                        ).inc()
+                        t = await self._queue_service.get_task_by_id(t)
+                        t.status = Outcome.Failure
+                        await self._queue_service.put_task(t)
+
                     self._current_tasks = {
                         k: v
                         for k, v in self._current_tasks.items()
                         if now - v < self.max_task_age
                     }
                     continue
+                if self._eviction_count > self.max_evictions:
+                    self._logger.critical(
+                        f"Exit. Too many evictions {self._eviction_count}"
+                    )
+                    break
                 for p, bot in itertools.product(Priority, (self._bot_id, None)):
                     if self._high_priority and p in (Priority.Low, Priority.Normal):
                         continue
-                    task_id = await self._queue_service.get_next_task_id(p, bot)
+                    route_label = RouteLabel(
+                        priority=p, bot_id=bot, bot_pool=self._bot_pool
+                    )
+                    task_id = await self._queue_service.get_next_task_id(route_label)
                     if task_id is not None:
-                        self._logger.debug(f"{task_id} from {p},{bot}")
+                        self._logger.debug(f"{task_id} from {p},{bot},{self._bot_pool}")
                         break
                 else:
                     cnt.IDLE.labels(self._human_name).inc()
@@ -125,15 +157,21 @@ class Bot(Client):
                         f"Collision {task} is in {self._current_tasks}"
                     )
                 self._current_tasks[task_id] = datetime.utcnow()
-                self._logger.debug(f"{task_id}, {task.params}")
+                self._logger.debug(
+                    f"{task_id},{list(self._current_tasks.keys())}, {task.params}"
+                )
                 try:
                     cnt.REQ_BY_METHOD.labels(self._human_name, task.command.value).inc()
-                    if task.command == Command.New:
-                        await self.send_prompt(task.params.prompt)
+                    if task.command == Command.New and isinstance(
+                        task.params, GenerateTask
+                    ):
+                        r = await self.send_prompt(task.params.prompt)
                         task.status = Outcome.Pending
-                        task.bot_id = self._bot_id
+                        task.route_label.bot_id = self._bot_id
                         await self._queue_service.put_task(task)
-                    elif task.command == Command.Variation:
+                    elif task.command == Command.Variation and isinstance(
+                        task.params, VariationTask
+                    ):
                         task = await self._queue_service.get_task_by_id(task.uuid)
                         if task.discord_msg_id is None or task.deliverable is None:
                             task.status = Outcome.Failure
@@ -154,7 +192,7 @@ class Bot(Client):
                     self._logger.error(f"{ex} {task}")
                     if task.command == Command.New:
                         await self._queue_service.push_back_task_id(
-                            str(task.uuid), queue_priority=task.priority
+                            str(task.uuid), task.route_label
                         )
                     if task_id is not None and task_id in self._current_tasks:
                         del self._current_tasks[task_id]
@@ -162,16 +200,21 @@ class Bot(Client):
                     raise
             except Exception as ex:
                 self._logger.error(ex)
+        await self.close()
 
     async def start(self):
+        t = None
         try:
-            asyncio.create_task(self._worker())
+            t = asyncio.create_task(self._worker())
             self._logger.info(f"Bot id {self._bot_id} discord coroutine starting")
             if self._high_priority:
                 await self.set_fast_mode()
             await super().start(self._bot_access_token)
         except asyncio.exceptions.CancelledError:
-            pass
+            if t is not None:
+                t.cancel()
+            self._logger.warning("cancelled")
+            return
         except Exception as ex:
             self._logger.error(ex)
 
@@ -201,8 +244,9 @@ class Bot(Client):
             t
             for t in t__
             if t.command == Command.New
-            and self.clean_str.sub("", t.params.prompt)
-            in self.clean_str.sub("", message.content)
+            and isinstance(t.params, GenerateTask)
+            and self.clean_str.sub("", t.params.prompt.split("--")[0])[:255]
+            in self.clean_str.sub("", message.content.split("--")[0])
         ]
         if len(t_) > 1:
             t_ = sorted(t_, key=lambda i: len(i.params.prompt))
@@ -229,8 +273,15 @@ class Bot(Client):
                             message.reference.message_id
                         )
                     else:
+                        cnt.REQ_BY_METHOD_ERROR.labels(
+                            self._human_name, "unknown", "TaskNotFound"
+                        ).inc()
+                        self._logger.error(f"uid for {message.content} was not found")
                         return
                 except:
+                    cnt.REQ_BY_METHOD_ERROR.labels(
+                        self._human_name, "unknown", "TaskNotFound"
+                    ).inc()
                     self._logger.error(f"uid for {message.content} was not found")
                     return
 
@@ -258,12 +309,38 @@ class Bot(Client):
                 del self._current_tasks[uid]
                 cnt.SUCCEED.labels(self._human_name).inc()
                 self._logger.info(len(self._current_tasks))
+            self._eviction_count = 0
+            if not self._high_priority:
+                self.max_task_age = timedelta(minutes=13)
         except Exception as ex:
             self._logger.error(ex)
 
     async def on_message_edit(self, _, after: Message):
         self._logger.debug(f"{after.id} {after.content}")
         await self._ensure_task(after)
+        if after.content.endswith("(Stopped)"):
+            try:
+                uid = await self._queue_service.lookup_task_by_msg(after.id)
+            except:
+                try:
+                    if (
+                        after.reference is not None
+                        and after.reference.message_id is not None
+                    ):
+
+                        uid = await self._queue_service.lookup_task_by_msg(
+                            after.reference.message_id
+                        )
+                    else:
+                        return
+                except:
+                    self._logger.error(f"uid for {after.content} was not found")
+                    return
+            task = await self._queue_service.get_task_by_id(uid)
+            task.status = Outcome.Failure
+            await self._queue_service.put_task(task)
+            del self._current_tasks[uid]
+            self._logger.info(len(self._current_tasks))
         if "%" in after.content:
             try:
                 uid = await self._queue_service.lookup_task_by_msg(after.id)
@@ -288,6 +365,9 @@ class Bot(Client):
                 await self._queue_service.put_task(task)
             if mo := self.mode_str.search(after.content):
                 if self._high_priority and mo.group(1) != "fast":
+                    cnt.REQ_BY_METHOD_ERROR.labels(
+                        self._human_name, "unknown", "NotInFastMode"
+                    ).inc()
                     self._logger.error(f"not in fast mode {after.content}")
 
     async def set_fast_mode(self):
