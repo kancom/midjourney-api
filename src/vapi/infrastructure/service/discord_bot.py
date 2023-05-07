@@ -165,7 +165,7 @@ class Bot(Client):
                     if task.command == Command.New and isinstance(
                         task.params, GenerateTask
                     ):
-                        r = await self.send_prompt(task.params.prompt)
+                        await self.send_prompt(task.params.prompt)
                         task.status = Outcome.Pending
                         task.route_label.bot_id = self._bot_id
                         await self._queue_service.put_task(task)
@@ -221,7 +221,15 @@ class Bot(Client):
     async def _ensure_task(self, message: Message):
         # result of new generation?
         try:
-            await self._queue_service.lookup_task_by_msg(message.id)
+            task_id = await self._queue_service.lookup_task_by_msg(message.id)
+            task = await self._queue_service.get_task_by_id(task_id)
+            if (
+                task.command == Command.New
+                and task.params.prompt
+                and task.params.prompt != message.content
+            ):
+                task.params.prompt = message.content
+                await self._queue_service.put_task(task)
             return
         except:
             pass
@@ -232,6 +240,14 @@ class Bot(Client):
                     message.reference.message_id
                 )
                 await self._queue_service.map_msg2task(message.id, task_id)
+                task = await self._queue_service.get_task_by_id(task_id)
+                if (
+                    task.command == Command.New
+                    and task.params.prompt
+                    and task.params.prompt != message.content
+                ):
+                    task.params.prompt = message.content
+                    await self._queue_service.put_task(task)
                 return
             except:
                 pass
