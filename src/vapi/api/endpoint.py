@@ -76,6 +76,9 @@ async def get_status(
     uuid: uuid.UUID,
     queue_service: IQueueService = Depends(Provide[Container.queue_service]),
 ):
-    task = await queue_service.get_task_by_id(uuid)
+    try:
+        task = await queue_service.get_task_by_id(uuid)
+    except NotInCollection as ex:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ex))
     await queue_service.put_task(task)
     return ResponseStatus(**task.dict(exclude={"uuid", "discord_msg_id"}))

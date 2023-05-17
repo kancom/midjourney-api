@@ -109,5 +109,3 @@ Dockerfile-dev
 .DS_Store
 .envrc
 
-# pipenv
-Pipfile*
