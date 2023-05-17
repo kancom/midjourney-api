@@ -45,6 +45,7 @@ class Bot(Client):
     progress_str = re.compile(r"\(([0-9]+)%\)")
     mode_str = re.compile(r"\(([a-z]+), ([a-z]+)\)")
     clean_str = re.compile(r"[^A-Za-z]")
+    percent_re = r"\d+%"
     max_evictions = 5
 
     class BotInitCont(BaseModel):
@@ -261,7 +262,9 @@ class Bot(Client):
             for t in t__
             if t.command == Command.New
             and isinstance(t.params, GenerateTask)
-            and self.clean_str.sub("", t.params.prompt.split("--")[0])[:255]
+            and self.clean_str.sub(
+                "", re.split(self.percent_re, t.params.prompt)[0].split("--")[0]
+            )[:255]
             in self.clean_str.sub("", message.content.split("--")[0])
         ]
         if len(t_) > 1:
