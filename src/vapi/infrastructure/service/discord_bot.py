@@ -137,7 +137,11 @@ class Bot(Client):
                     )
                     break
                 for p, bot in itertools.product(Priority, (self._bot_id, None)):
-                    if self._high_priority and p in (Priority.Low, Priority.Normal):
+                    if (
+                        self._high_priority and p in (Priority.Low, Priority.Normal)
+                    ) or (
+                        not self._high_priority and p in (Priority.VIP, Priority.High)
+                    ):
                         continue
                     route_label = RouteLabel(
                         priority=p, bot_id=bot, bot_pool=self._bot_pool
