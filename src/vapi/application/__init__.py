@@ -1,7 +1,8 @@
 from .domain.task import (GenerateTask, RouteLabel, Task, TaskDeliverable,
                           VariationTask)
-from .foundation import (Command, ImagePosition, NotInCollection, Outcome,
-                         Priority)
+from .foundation import (Command, ImagePosition, NotFound, NotInCollection,
+                         Outcome, Priority)
+from .service.captcha_service import ICaptchaService
 from .service.queue_service import IQueueService
 
 __all__ = [
@@ -16,4 +17,6 @@ __all__ = [
     "NotInCollection",
     "TaskDeliverable",
     "RouteLabel",
+    "ICaptchaService",
+    "NotFound",
 ]

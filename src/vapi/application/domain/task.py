@@ -30,6 +30,7 @@ class Task(BaseModel):
     uuid: uuid_pkg.UUID = Field(default_factory=uuid_pkg.uuid4)
     route_label: RouteLabel
     command: Command
+    error: Optional[str] = None
     params: Union[GenerateTask, VariationTask]
     status: Outcome = Outcome.New
     progress: Optional[int] = None

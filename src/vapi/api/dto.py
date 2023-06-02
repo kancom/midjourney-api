@@ -26,5 +26,6 @@ class ResponseStatus(BaseModel):
     command: Command
     params: Union[GenerateTask, VariationTask]
     status: Outcome = Outcome.New
+    error: Optional[str] = None
     progress: Optional[int] = None
     deliverable: Optional[TaskDeliverable] = None

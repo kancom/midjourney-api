@@ -7,7 +7,7 @@ from prometheus_client import start_http_server
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from vapi.application import IQueueService
+from vapi.application import ICaptchaService, IQueueService
 from vapi.infrastructure.service.discord_bot import Bot
 from vapi.settings import Settings
 from vapi.wiring import Container
@@ -16,10 +16,17 @@ tasks = {}
 
 
 class FileChangeHandler(FileSystemEventHandler):
-    def __init__(self, loop, path: str, queue_service: IQueueService):
+    def __init__(
+        self,
+        loop,
+        path: str,
+        queue_service: IQueueService,
+        captcha_srv: ICaptchaService,
+    ):
         self.loop = loop
         self._path = path
         self._queue = queue_service
+        self._captcha_srv = captcha_srv
 
     def on_modified(self, event):
         print(event)
@@ -42,6 +49,7 @@ class FileChangeHandler(FileSystemEventHandler):
                     bot_access_token=row["bot_access_token"],
                     human_name=row["human_name"],
                     proxy=row.get("proxy"),
+                    captcha_service=self._captcha_srv,
                 )
                 if container.bot_id in tasks:
                     if hash(container) == tasks[container.bot_id][0]:
@@ -50,7 +58,9 @@ class FileChangeHandler(FileSystemEventHandler):
                     tasks[container.bot_id][1].cancel()
                     del tasks[container.bot_id]
                 bot = Bot(
-                    init_cont=container, queue_service=self._queue, loop=self.loop
+                    init_cont=container,
+                    queue_service=self._queue
+                    # , loop=self.loop
                 )
                 logger.info("adding", human=bot.identity)
                 task = self.loop.create_task(bot.start())
@@ -67,6 +77,7 @@ class FileChangeHandler(FileSystemEventHandler):
 @inject
 async def main(
     queue_service: IQueueService = Provide[Container.queue_service],
+    captcha_srv: ICaptchaService = Provide[Container.captcha_service],
 ):
     settings = Settings()
 
@@ -74,6 +85,7 @@ async def main(
         asyncio.get_running_loop(),
         path=settings.discord_identity_file,
         queue_service=queue_service,
+        captcha_srv=captcha_srv,
     )
     observer = Observer()
     observer.schedule(event_handler, settings.discord_identity_file, recursive=True)

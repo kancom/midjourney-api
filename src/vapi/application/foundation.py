@@ -30,3 +30,7 @@ class Outcome(str, Enum):
 
 class NotInCollection(Exception):
     pass
+
+
+class NotFound(Exception):
+    pass
