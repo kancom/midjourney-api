@@ -14,7 +14,7 @@ IDLE = Counter("idle_cycles", "Roughly how many seconds bot was idle", ["bot"])
 
 INC_QUEUE_LEN = Gauge("inc_queue_len", "Length of incoming queue", ["queue"])
 
-BOT_STATE = Gauge("bot_state", "Bot mode fast/relaxed", ["bot"])
+BOT_STATE = Gauge("bot_state", "Bot mode offline/fast/relaxed", ["bot", "pool"])
 
 FAST_TIME_REMAINING = Gauge(
     "fast_time_remaining", "fast time remaining seconds", ["bot"]

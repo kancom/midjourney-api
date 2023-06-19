@@ -4,15 +4,14 @@ from typing import Optional
 from uuid import UUID
 
 import vapi.infrastructure.counters as cnt
-from vapi.application import (IQueueService, NotInCollection, RouteLabel,
-                              Task)
+from vapi.application import IQueueService, NotInCollection, RouteLabel, Task
 
 from ..redis_base import RedisVolatileRepo
 
 
 class RedisQueueRepo(RedisVolatileRepo, IQueueService):
     task_queue = "queue"
-    ttl = timedelta(hours=12)
+    ttl = timedelta(hours=24)
 
     @classmethod
     def _get_q_name_by_prior(cls, route_label: RouteLabel):

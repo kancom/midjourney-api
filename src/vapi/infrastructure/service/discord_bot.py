@@ -3,7 +3,6 @@ import itertools
 import random
 import re
 import sys
-from asyncio.tasks import sleep
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -42,6 +41,7 @@ class GenericRequestError(Exception):
 
 
 class Mode(Enum):
+    Offline = 0
     Relaxed = 1
     Fast = 2
 
@@ -51,6 +51,7 @@ class Bot(Client):
         mode: Mode
         queue: int
         fast_hours: int
+        active: bool
 
     class BotInitCont(BaseModel):
         bot_id: int
@@ -111,7 +112,7 @@ class Bot(Client):
         self._logger = logger.bind(human=self._human_name)
         self._logger.debug(self._proxy)
         self._eviction_count = 0
-        self._sleeping = False
+        self._offline = False
         self.max_task_age = (
             timedelta(minutes=10) if self._high_priority else timedelta(minutes=13)
         )
@@ -123,6 +124,8 @@ class Bot(Client):
     async def _worker(self):
         self._logger.info(f"Bot id {self._bot_id} worker starting")
         tasks_processed = 0
+
+        cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(Mode.Offline.value)
         await asyncio.sleep(random.randrange(30))
         while self.status != discord.enums.Status.online:
             await asyncio.sleep(5)
@@ -132,20 +135,18 @@ class Bot(Client):
             try:
                 task_id = None
                 await asyncio.sleep(1)
-                while self._sleeping:
+                while self._offline:
                     await asyncio.sleep(60)
 
-                cnt.QUEUE_LEN.labels(self._human_name, self._high_priority).set(
-                    len(self._current_tasks)
-                )
-                if len(self._current_tasks) >= self.capacity[self._high_priority]:
+                if True:
                     now = datetime.utcnow()
                     ev = [
                         k
                         for k, v in self._current_tasks.items()
                         if now - v > self.max_task_age
                     ]
-                    if len(ev) and not self._high_priority:
+                    if len(ev):
+                        # and not self._high_priority:
                         self.max_task_age = timedelta(minutes=10)
                         self._eviction_count += 1
                         self._logger.warning(ev)
@@ -162,12 +163,19 @@ class Bot(Client):
                         for k, v in self._current_tasks.items()
                         if now - v < self.max_task_age
                     }
-                    continue
+                    # continue
                 if self._eviction_count > self.max_evictions:
                     self._logger.critical(
                         f"Exit. Too many evictions {self._eviction_count}"
                     )
                     break
+
+                if len(self._current_tasks) >= self.capacity[self._high_priority]:
+                    continue
+
+                cnt.QUEUE_LEN.labels(self._human_name, self._high_priority).set(
+                    len(self._current_tasks)
+                )
                 if tasks_processed > 0 and tasks_processed % 10 == 0:
                     await self.send_info_cmd()
                     tasks_processed = 0
@@ -188,7 +196,7 @@ class Bot(Client):
                     )
                     task_id = await self._queue_service.get_next_task_id(route_label)
                     if task_id is not None:
-                        self._logger.debug(f"{task_id} from {p},{bot},{self._bot_pool}")
+                        self._logger.debug(f"{task_id} from {route_label}")
                         break
                 else:
                     cnt.IDLE.labels(self._human_name).inc()
@@ -206,7 +214,6 @@ class Bot(Client):
                     f"{task_id},{list(self._current_tasks.keys())}, {task.params}"
                 )
                 try:
-                    cnt.BOT_STATE.labels(self._human_name).set(int(self._high_priority))
                     tasks_processed += 1
                     cnt.REQ_BY_METHOD.labels(self._human_name, task.command.value).inc()
                     if task.command == Command.New and isinstance(
@@ -372,6 +379,20 @@ class Bot(Client):
                     ).inc()
                     self._logger.error(f"uid for {message.content} was not found")
                     return
+            for emb in message.embeds:
+                self._logger.debug(f"{emb.title}: {emb.description}")
+                self._logger.debug(f"{emb.image}")
+                self._logger.debug(f" {emb.to_dict()}")
+                if not await self._dispatch_embed(emb, message):
+                    task = await self._queue_service.get_task_by_id(uid)
+                    if task.command == Command.New:
+                        self._logger.debug(f"push back {uid}")
+                        await self._queue_service.push_back_task_id(
+                            str(task.uuid), task.route_label
+                        )
+                    if uid is not None and uid in self._current_tasks:
+                        del self._current_tasks[uid]
+                    return
 
             if "Waiting to start" in message.content:
                 task = await self._queue_service.get_task_by_id(uid)
@@ -380,6 +401,9 @@ class Bot(Client):
                 task.discord_msg_id = message.id
                 await self._queue_service.put_task(task)
             if "Open on website" in message.content or len(message.attachments):
+                cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                    Mode.Fast.value if self._high_priority else Mode.Relaxed.value
+                )
                 task = await self._queue_service.get_task_by_id(uid)
                 task.status = Outcome.Success
                 task.progress = 100
@@ -388,7 +412,7 @@ class Bot(Client):
                     filename=message.attachments[0].filename,
                 )
                 task.discord_msg_id = message.id
-                self._logger.debug(message.attachments[0].url)
+                self._logger.debug(f"{uid}, {message.attachments[0].url}")
                 await self._queue_service.put_task(task)
                 del self._current_tasks[uid]
                 cnt.SUCCEED.labels(self._human_name).inc()
@@ -404,11 +428,15 @@ class Bot(Client):
         mode = Mode.Relaxed if "Relaxed" in d["Job Mode"] else Mode.Fast
         pfx = "fast" if mode == Mode.Fast else "relax"
         queue = int(d.get(f"Queued Jobs ({pfx})", 0))
-
+        try:
+            fast_hours = float(d["Fast Time Remaining"].split("/")[0])
+        except:
+            fast_hours = 0
         return cls.Info(
             mode=mode,
             queue=queue,
-            fast_hours=3600 * float(d["Fast Time Remaining"].split("/")[0]),
+            fast_hours=3600 * fast_hours,
+            active="Paused" not in d["Subscription"],
         )
 
     async def _send_tg_notification(self, text):
@@ -446,6 +474,7 @@ class Bot(Client):
                         self._logger.debug(embed.image.url)
                         self._logger.debug(msg.components)
                         self._logger.exception(ex)
+                return True
 
             elif (
                 "third-party" in embed.description
@@ -460,22 +489,34 @@ class Bot(Client):
                     await self._press_btn(msg.id, list(labels.values())[0], flags=64)
                 else:
                     self._logger.error(f"can't find Ack {msg.components[0].children}")
+                return True
             elif "blocked" in embed.description and " ban " in embed.description:
-                msg_ = f"I was banned {embed.description}. Sleep for 25 hours"
-                self._logger.error(msg_)
-                s_ = embed.description.split(":")
+                self._offline = True
                 i_ = 25 * 60 * 60
+                s_ = embed.description.split(":")
                 if len(s_) > 1:
-                    until = datetime.fromtimestamp(int(2))
-                    i_ = (datetime.utcnow() - until).total_seconds()
+                    until = datetime.fromtimestamp(int(s_[1]))
+                    i_ = (until - datetime.utcnow()).total_seconds()
+                msg_ = f"I was banned {embed.description}. Sleep for {i_}"
+                self._logger.error(msg_)
                 await self._send_tg_notification(msg_)
-                self._sleeping = True
+                cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                    Mode.Offline.value
+                )
                 await asyncio.sleep(i_)
-                self._sleeping = False
+                self._offline = False
                 return False
-            elif "billing" in embed.description:
+            elif (
+                "billing" in embed.description
+                or "Subscription is paused" in embed.description
+                or "subscribing" in embed.description
+            ):
+                self._offline = True
                 msg_ = embed.description
                 self._logger.error(msg_)
+                cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                    Mode.Offline.value
+                )
                 await self._send_tg_notification(msg_)
                 return False
 
@@ -524,6 +565,13 @@ class Bot(Client):
                         if ":" in l
                     }
                     self._info = self._parse_info(d)
+                    if not self._info.active:
+                        self._offline = True
+                        msg_ = f"{self._human_name} Subscription is paused. Send manual /INFO after activation"
+                        self._logger.error(msg_)
+                        await self._send_tg_notification(msg_)
+                    else:
+                        self._offline = False
                     if (
                         self._high_priority
                         and self._info.fast_hours < self.min_fast_hours
@@ -534,9 +582,6 @@ class Bot(Client):
                         await asyncio.sleep(10)
                         self._high_priority = False
                         await self.send_setrelaxed_cmd()
-                        cnt.BOT_STATE.labels(self._human_name).set(
-                            int(self._high_priority)
-                        )
                     elif (
                         not self._high_priority
                         and self._info.fast_hours > 1.5 * self.min_fast_hours
@@ -544,9 +589,15 @@ class Bot(Client):
                         await asyncio.sleep(10)
                         self._high_priority = True
                         await self.send_setfast_cmd()
-                        cnt.BOT_STATE.labels(self._human_name).set(
-                            int(self._high_priority)
+                    state = Mode.Offline.value
+                    if self._info.active:
+                        state = (
+                            Mode.Fast.value
+                            if self._high_priority
+                            else Mode.Relaxed.value
                         )
+
+                    cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(state)
                     self._logger.debug(self._info)
                     cnt.FAST_TIME_REMAINING.labels(self._human_name).set(
                         self._info.fast_hours
@@ -648,9 +699,11 @@ class Bot(Client):
             "application_id": "936929561302675456",
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
-            "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
+            "session_id": self.ws.session_id,
+            # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
-                "version": "1077969938624553050",
+                "version": "1118961510123847772",
+                # "version": "1077969938624553050",
                 "id": "938956540159881230",
                 "name": "imagine",
                 "type": 1,
@@ -658,7 +711,7 @@ class Bot(Client):
                 "application_command": {
                     "id": "938956540159881230",
                     "application_id": "936929561302675456",
-                    "version": "1077969938624553050",
+                    "version": "1118961510123847772",
                     "default_permission": True,
                     "default_member_permissions": None,
                     "type": 1,
@@ -695,7 +748,8 @@ class Bot(Client):
             "message_flags": flags,
             "message_id": dscrd_msg_id,
             "application_id": "936929561302675456",
-            "session_id": "1f3dbdf09efdf93d81a3a6420882c92c",
+            "session_id": self.ws.session_id,
+            # "session_id": "1f3dbdf09efdf93d81a3a6420882c92c",
             "data": {
                 "component_type": 2,
                 "custom_id": custom_id,
@@ -709,9 +763,10 @@ class Bot(Client):
             "application_id": "936929561302675456",
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
-            "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
+            "session_id": self.ws.session_id,
+            # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
-                "version": "987795925764280356",
+                "version": "1118961510123847776",
                 "id": "972289487818334209",
                 "name": "info",
                 "type": 1,
@@ -719,7 +774,7 @@ class Bot(Client):
                 "application_command": {
                     "id": "972289487818334209",
                     "application_id": "936929561302675456",
-                    "version": "987795925764280356",
+                    "version": "1118961510123847776",
                     "default_member_permissions": None,
                     "type": 1,
                     "nsfw": False,
@@ -740,7 +795,8 @@ class Bot(Client):
             "application_id": "936929561302675456",
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
-            "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
+            "session_id": self.ws.session_id,
+            # "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
             "data": {
                 "version": "987795926183731231",
                 "id": "972289487818334212",
@@ -769,7 +825,8 @@ class Bot(Client):
             "application_id": "936929561302675456",
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
-            "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
+            "session_id": self.ws.session_id,
+            # "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
             "data": {
                 "version": "987795926183731232",
                 "id": "972289487818334213",
@@ -791,3 +848,183 @@ class Bot(Client):
             },
         }
         return await self._send_req(payload)
+
+
+# https://discord.com/api/v9/channels/1108089142883135583/application-commands/search?type=1&query=i&limit=7&include_applications=false
+# {
+#   "applications": null,
+#   "application_commands": [
+#     {
+#       "id": "938956540159881230",
+#       "application_id": "936929561302675456",
+#       "version": "1118961510123847772",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "imagine",
+#       "description": "Create images with Midjourney",
+#       "dm_permission": true,
+#       "contexts": [
+#         0,
+#         1,
+#         2
+#       ],
+#       "options": [
+#         {
+#           "type": 3,
+#           "name": "prompt",
+#           "description": "The prompt to imagine",
+#           "required": true
+#         }
+#       ]
+#     },
+#     {
+#       "id": "972289487818334209",
+#       "application_id": "936929561302675456",
+#       "version": "1118961510123847776",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "info",
+#       "description": "View information about your profile.",
+#       "dm_permission": true,
+#       "contexts": [
+#         0,
+#         1,
+#         2
+#       ]
+#     },
+#     {
+#       "id": "986816068012081172",
+#       "application_id": "936929561302675456",
+#       "version": "1087986002192252980",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "invite",
+#       "description": "Get an invite link to the Midjourney Discord server",
+#       "dm_permission": true,
+#       "contexts": null
+#     },
+#     {
+#       "id": "1092492867185950852",
+#       "application_id": "936929561302675456",
+#       "version": "1118961510123847774",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "describe",
+#       "description": "Writes a prompt based on your image.",
+#       "dm_permission": true,
+#       "contexts": [
+#         0,
+#         1,
+#         2
+#       ],
+#       "options": [
+#         {
+#           "type": 11,
+#           "name": "image",
+#           "description": "The image to describe",
+#           "required": true
+#         }
+#       ]
+#     },
+#     {
+#       "id": "984273800587776053",
+#       "application_id": "936929561302675456",
+#       "version": "1029519354955579472",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "prefer",
+#       "description": "…",
+#       "dm_permission": true,
+#       "contexts": null,
+#       "options": [
+#         {
+#           "type": 2,
+#           "name": "option",
+#           "description": "…",
+#           "options": [
+#             {
+#               "type": 1,
+#               "name": "set",
+#               "description": "Set a custom option.",
+#               "options": [
+#                 {
+#                   "type": 3,
+#                   "name": "option",
+#                   "description": "…",
+#                   "required": true,
+#                   "autocomplete": true
+#                 },
+#                 {
+#                   "type": 3,
+#                   "name": "value",
+#                   "description": "…"
+#                 }
+#               ]
+#             },
+#             {
+#               "type": 1,
+#               "name": "list",
+#               "description": "View your current custom options."
+#             }
+#           ]
+#         },
+#         {
+#           "type": 1,
+#           "name": "auto_dm",
+#           "description": "Whether or not to automatically send job results to your DMs."
+#         },
+#         {
+#           "type": 1,
+#           "name": "suffix",
+#           "description": "Suffix to automatically add to the end of every prompt. Leave empty to remove.",
+#           "options": [
+#             {
+#               "type": 3,
+#               "name": "new_value",
+#               "description": "…"
+#             }
+#           ]
+#         },
+#         {
+#           "type": 1,
+#           "name": "remix",
+#           "description": "Toggle remix mode."
+#         }
+#       ]
+#     },
+#     {
+#       "id": "972289487818334210",
+#       "application_id": "936929561302675456",
+#       "version": "1065569343456419862",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "private",
+#       "description": "Toggle stealth mode",
+#       "dm_permission": true,
+#       "contexts": null
+#     },
+#     {
+#       "id": "972289487818334211",
+#       "application_id": "936929561302675456",
+#       "version": "987795926183731230",
+#       "default_member_permissions": null,
+#       "type": 1,
+#       "nsfw": false,
+#       "name": "public",
+#       "description": "Switch to public mode",
+#       "dm_permission": true,
+#       "contexts": null
+#     }
+#   ],
+#   "cursor": {
+#     "previous": "WzExMTg5NjI4ODA0ODY4NDY0ODQsIDAsIDkzODk1NjU0MDE1OTg4MTIzMF0=",
+#     "next": "WzExMTg5NjI4ODA0ODY4NDY0ODQsIDcsIDEwMDA4NTA3NDM0NzkyNTUwODFd",
+#     "repaired": false
+#   }
+# }
