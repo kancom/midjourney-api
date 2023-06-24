@@ -1,4 +1,4 @@
-FROM python:3.9-slim  AS base
+FROM python:3.9-slim-bullseye  AS base
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
   && apt install -y python3.9-dev  build-essential vim
