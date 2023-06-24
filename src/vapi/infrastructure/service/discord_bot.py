@@ -289,6 +289,7 @@ class Bot(Client):
             task = await self._queue_service.get_task_by_id(task_id)
             if (
                 task.command == Command.New
+                and len(message.content)
                 and task.params.prompt
                 and task.params.prompt != message.content
             ):
@@ -307,6 +308,7 @@ class Bot(Client):
                 task = await self._queue_service.get_task_by_id(task_id)
                 if (
                     task.command == Command.New
+                    and len(message.content)
                     and task.params.prompt
                     and task.params.prompt != message.content
                 ):
@@ -346,14 +348,14 @@ class Bot(Client):
         if message.channel.id != self._channel_id:
             return
 
-        for emb in message.embeds:
-            self._logger.debug(f"{emb.title}: {emb.description}")
-            self._logger.debug(f"{emb.image}")
-            self._logger.debug(f" {emb.to_dict()}")
-            if not await self._dispatch_embed(emb, message):
-                return
+        # for emb in message.embeds:
+        #     self._logger.debug(f"{message.id}, {emb.title}: {emb.description}")
+        #     self._logger.debug(f"{message.id}, {emb.image}")
+        #     self._logger.debug(f"{message.id}, {emb.to_dict()}")
+        #     if not await self._dispatch_embed(emb, message):
+        #         return
         try:
-            self._logger.debug(f"{message.id} {message.content} {message.attachments}")
+            self._logger.debug(f"{message.id},{message.content}, {message.attachments}")
             await self._ensure_task(message)
             try:
                 uid = await self._queue_service.lookup_task_by_msg(message.id)
@@ -384,6 +386,8 @@ class Bot(Client):
                 self._logger.debug(f"{emb.image}")
                 self._logger.debug(f" {emb.to_dict()}")
                 if not await self._dispatch_embed(emb, message):
+                    # if mj says there's some permanent failure e.g. subscription's expired.
+                    # stop processing it here and push back to process in other workers
                     task = await self._queue_service.get_task_by_id(uid)
                     if task.command == Command.New:
                         self._logger.debug(f"push back {uid}")
