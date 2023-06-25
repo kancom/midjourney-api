@@ -245,6 +245,7 @@ class Bot(Client):
                     ).inc()
                     self._logger.error(f"{ex} {task}")
                     if task.command == Command.New:
+                        task.route_label.bot_id = None
                         await self._queue_service.push_back_task_id(
                             str(task.uuid), task.route_label
                         )
