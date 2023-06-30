@@ -46,6 +46,12 @@ class Mode(Enum):
     Fast = 2
 
 
+class DispatchOutcome(Enum):
+    Abort = 1
+    Retry = 2
+    Continue = 3
+
+
 class Bot(Client):
     class Info(BaseModel):
         mode: Mode
@@ -246,6 +252,8 @@ class Bot(Client):
                     self._logger.error(f"{ex} {task}")
                     if task.command == Command.New:
                         task.route_label.bot_id = None
+                        task.status = Outcome.New
+                        await self._queue_service.put_task(task)
                         await self._queue_service.push_back_task_id(
                             str(task.uuid), task.route_label
                         )
@@ -349,12 +357,6 @@ class Bot(Client):
         if message.channel.id != self._channel_id:
             return
 
-        # for emb in message.embeds:
-        #     self._logger.debug(f"{message.id}, {emb.title}: {emb.description}")
-        #     self._logger.debug(f"{message.id}, {emb.image}")
-        #     self._logger.debug(f"{message.id}, {emb.to_dict()}")
-        #     if not await self._dispatch_embed(emb, message):
-        #         return
         try:
             self._logger.debug(f"{message.id},{message.content}, {message.attachments}")
             await self._ensure_task(message)
@@ -386,17 +388,23 @@ class Bot(Client):
                 self._logger.debug(f"{emb.title}: {emb.description}")
                 self._logger.debug(f"{emb.image}")
                 self._logger.debug(f" {emb.to_dict()}")
-                if not await self._dispatch_embed(emb, message):
+                outc = await self._dispatch_embed(emb, message)
+                if outc == DispatchOutcome.Retry:
                     # if mj says there's some permanent failure e.g. subscription's expired.
                     # stop processing it here and push back to process in other workers
                     task = await self._queue_service.get_task_by_id(uid)
                     if task.command == Command.New:
                         self._logger.debug(f"push back {uid}")
+                        task.route_label.bot_id = None
+                        task.status = Outcome.New
+                        await self._queue_service.put_task(task)
                         await self._queue_service.push_back_task_id(
                             str(task.uuid), task.route_label
                         )
                     if uid is not None and uid in self._current_tasks:
                         del self._current_tasks[uid]
+                    return
+                elif outc == DispatchOutcome.Abort:
                     return
 
             if "Waiting to start" in message.content:
@@ -430,13 +438,17 @@ class Bot(Client):
 
     @classmethod
     def _parse_info(cls, d: dict) -> Info:
-        mode = Mode.Relaxed if "Relaxed" in d["Job Mode"] else Mode.Fast
+        mode = Mode.Relaxed
+        if "Job Mode" in d and "Relaxed" not in d["Job Mode"]:
+            mode = Mode.Fast
         pfx = "fast" if mode == Mode.Fast else "relax"
         queue = int(d.get(f"Queued Jobs ({pfx})", 0))
         try:
             fast_hours = float(d["Fast Time Remaining"].split("/")[0])
         except:
             fast_hours = 0
+        if fast_hours == 0:
+            mode = Mode.Relaxed
         return cls.Info(
             mode=mode,
             queue=queue,
@@ -459,7 +471,10 @@ class Bot(Client):
                 if response.status > 299:
                     self._logger.error("failed to notify")
 
-    async def _dispatch_embed(self, embed: discord.Embed, msg: Message) -> bool:
+    async def _dispatch_embed(
+        self, embed: discord.Embed, msg: Message
+    ) -> DispatchOutcome:
+        """dispatch and tell if needs retry at another worker"""
         if embed.description:
             if "human" in embed.description:
                 for _ in range(2):
@@ -479,7 +494,7 @@ class Bot(Client):
                         self._logger.debug(embed.image.url)
                         self._logger.debug(msg.components)
                         self._logger.exception(ex)
-                return True
+                return DispatchOutcome.Continue
 
             elif (
                 "third-party" in embed.description
@@ -494,7 +509,7 @@ class Bot(Client):
                     await self._press_btn(msg.id, list(labels.values())[0], flags=64)
                 else:
                     self._logger.error(f"can't find Ack {msg.components[0].children}")
-                return True
+                return DispatchOutcome.Retry
             elif "blocked" in embed.description and " ban " in embed.description:
                 self._offline = True
                 i_ = 25 * 60 * 60
@@ -510,7 +525,7 @@ class Bot(Client):
                 )
                 await asyncio.sleep(i_)
                 self._offline = False
-                return False
+                return DispatchOutcome.Retry
             elif (
                 "billing" in embed.description
                 or "Subscription is paused" in embed.description
@@ -523,7 +538,11 @@ class Bot(Client):
                     Mode.Offline.value
                 )
                 await self._send_tg_notification(msg_)
-                return False
+                return DispatchOutcome.Retry
+            elif "run out of hours" in embed.description:
+                self._high_priority = False
+                await self.send_setrelaxed_cmd()
+                return DispatchOutcome.Retry
 
         await self._ensure_task(msg)
         try:
@@ -536,20 +555,18 @@ class Bot(Client):
                         msg.reference.message_id
                     )
                 else:
-                    return False
+                    return DispatchOutcome.Abort
             except:
                 self._logger.error(f"uid for {msg.content} was not found")
-                return False
-            task = await self._queue_service.get_task_by_id(uid)
-            task.status = Outcome.Failure
-            task.progress = 0
-            task.error = embed.description
-            await self._queue_service.put_task(task)
-            del self._current_tasks[uid]
-            self._logger.info(len(self._current_tasks))
-            return False
-
-        return True
+                return DispatchOutcome.Abort
+        task = await self._queue_service.get_task_by_id(uid)
+        task.status = Outcome.Failure
+        task.progress = 0
+        task.error = embed.description
+        await self._queue_service.put_task(task)
+        del self._current_tasks[uid]
+        self._logger.info(len(self._current_tasks))
+        return DispatchOutcome.Abort
 
     async def on_message_edit(self, _, after: Message):
         if after.channel.id != self._channel_id:
@@ -613,7 +630,8 @@ class Bot(Client):
                 self._logger.debug(
                     f"{emb.title}: {emb.description}, {emb.image}. {emb.fields}, {emb.footer}"
                 )
-                if not await self._dispatch_embed(emb, after):
+                outc = await self._dispatch_embed(emb, after)
+                if outc == DispatchOutcome.Abort:
                     return
 
         await self._ensure_task(after)
