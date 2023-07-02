@@ -60,3 +60,19 @@ class RedisQueueRepo(RedisVolatileRepo, IQueueService):
         if c is None:
             raise NotInCollection(f"{msg_id} was not found")
         return UUID(c)
+
+    async def get_queue_len(self, route_label: RouteLabel) -> int:
+        q_nm = self._get_q_name_by_prior(route_label)
+        return await self._redis.llen(q_nm)
+
+    async def count_tickets(self, route_label: RouteLabel) -> int:
+        q_nm = self._get_q_name_by_prior(route_label)
+        return len(await self._redis.keys(f"ticket_{q_nm}*"))
+
+    async def put_ticket(self, route_label: RouteLabel):
+        if route_label.bot_id is None:
+            raise ValueError("bot_id is empty")
+        key = self._get_q_name_by_prior(route_label)
+        await self._redis.set(
+            f"ticket_{key}", 1, ex=int(timedelta(minutes=5).total_seconds())
+        )

@@ -127,6 +127,41 @@ class Bot(Client):
     def identity(self) -> str:
         return self._human_name or str(self._bot_id)
 
+    async def _assist_2peers(self):
+        if (
+            self._info is None
+            or self._info.fast_hours == 0
+            and len(self._current_tasks) > 1
+        ):
+            return
+        rl = RouteLabel(priority=Priority.High, bot_pool=self._bot_pool)
+        high_len = await self._queue_service.get_queue_len(rl)
+        high_tickets = await self._queue_service.count_tickets(rl)
+        rl = RouteLabel(priority=Priority.Normal, bot_pool=self._bot_pool)
+        normal_len = await self._queue_service.get_queue_len(rl)
+        normal_tickets = await self._queue_service.count_tickets(rl)
+        if self._high_priority:
+            # if need to help Normal queue
+            if (
+                normal_len > normal_tickets  # peer's len's too long
+                and high_tickets > high_len  # our capacity is enough
+                and high_tickets > 0  # one is spare
+            ):
+                self._logger.info(f"{self}: switching to assist to Normal queue")
+                self._high_priority = False
+                await self.send_setrelaxed_cmd()
+        else:
+            # if need to help High queue
+            if (
+                high_len > high_tickets
+                and normal_tickets > normal_len
+                and self._info.fast_hours > self.min_fast_hours
+                and normal_tickets > 0  # one is spare
+            ):
+                self._logger.info(f"{self}: switching to assist to High queue")
+                self._high_priority = True
+                await self.send_setfast_cmd()
+
     async def _worker(self):
         self._logger.info(f"Bot id {self._bot_id} worker starting")
         tasks_processed = 0
@@ -144,37 +179,48 @@ class Bot(Client):
                 while self._offline:
                     await asyncio.sleep(60)
 
-                if True:
-                    now = datetime.utcnow()
-                    ev = [
-                        k
-                        for k, v in self._current_tasks.items()
-                        if now - v > self.max_task_age
-                    ]
-                    if len(ev):
-                        # and not self._high_priority:
-                        self.max_task_age = timedelta(minutes=10)
-                        self._eviction_count += 1
-                        self._logger.warning(ev)
-                    for t in ev:
-                        cnt.REQ_ERROR.labels(
-                            self._human_name, "generic", "TaskEviction"
-                        ).inc()
-                        t = await self._queue_service.get_task_by_id(t)
-                        t.status = Outcome.Failure
-                        await self._queue_service.put_task(t)
-
-                    self._current_tasks = {
-                        k: v
-                        for k, v in self._current_tasks.items()
-                        if now - v < self.max_task_age
-                    }
-                    # continue
+                # stuck task cleanup
+                now = datetime.utcnow()
+                ev = [
+                    k
+                    for k, v in self._current_tasks.items()
+                    if now - v > self.max_task_age
+                ]
+                if len(ev):
+                    # and not self._high_priority:
+                    self.max_task_age = timedelta(minutes=10)
+                    self._eviction_count += 1
+                    self._logger.warning(ev)
+                for t in ev:
+                    cnt.REQ_ERROR.labels(
+                        self._human_name, "generic", "TaskEviction"
+                    ).inc()
+                    t = await self._queue_service.get_task_by_id(t)
+                    t.status = Outcome.Failure
+                    await self._queue_service.put_task(t)
+                self._current_tasks = {
+                    k: v
+                    for k, v in self._current_tasks.items()
+                    if now - v < self.max_task_age
+                }
                 if self._eviction_count > self.max_evictions:
                     self._logger.critical(
                         f"Exit. Too many evictions {self._eviction_count}"
                     )
                     break
+                # clean done
+
+                # assistance to peer
+                await self._assist_2peers()
+                await self._queue_service.put_ticket(
+                    RouteLabel(
+                        priority=Priority.High
+                        if self._high_priority
+                        else Priority.Normal,
+                        bot_pool=self._bot_pool,
+                        bot_id=self._bot_id,
+                    )
+                )
 
                 if len(self._current_tasks) >= self.capacity[self._high_priority]:
                     continue
@@ -686,9 +732,6 @@ class Bot(Client):
                         self._human_name, "generic", "NotInFastMode"
                     ).inc()
                     self._logger.error(f"not in fast mode {after.content}")
-
-    async def set_fast_mode(self):
-        self._logger.info(f"bot id {self._bot_id} settings Fast mode...")
 
     async def _send_req(self, payload: dict) -> str:
         header = {"authorization": self._user_access_token}
