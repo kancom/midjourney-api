@@ -15,8 +15,8 @@ from discord import Client
 from discord.message import Message
 from loguru import logger
 from pydantic import BaseModel
-from vapi.application import (Command, IQueueService, Outcome, Priority,
-                              RouteLabel, TaskDeliverable)
+from vapi.application import (Command, IQueueService, NotInCollection, Outcome,
+                              Priority, RouteLabel, TaskDeliverable)
 from vapi.application.domain.task import GenerateTask, VariationTask
 
 logger.remove()
@@ -145,7 +145,7 @@ class Bot(Client):
             if (
                 normal_len > normal_tickets  # peer's len's too long
                 and high_tickets > high_len  # our capacity is enough
-                and high_tickets > 0  # one is spare
+                and high_tickets > 1  # one is spare (1 is self already)
             ):
                 self._logger.info(f"{self}: switching to assist to Normal queue")
                 self._high_priority = False
@@ -156,7 +156,7 @@ class Bot(Client):
                 high_len > high_tickets
                 and normal_tickets > normal_len
                 and self._info.fast_hours > self.min_fast_hours
-                and normal_tickets > 0  # one is spare
+                # and normal_tickets > 0  # one is spare
             ):
                 self._logger.info(f"{self}: switching to assist to High queue")
                 self._high_priority = True
@@ -195,7 +195,11 @@ class Bot(Client):
                     cnt.REQ_ERROR.labels(
                         self._human_name, "generic", "TaskEviction"
                     ).inc()
-                    t = await self._queue_service.get_task_by_id(t)
+                    try:
+                        t = await self._queue_service.get_task_by_id(t)
+                    except NotInCollection:
+                        # already expired
+                        break
                     t.status = Outcome.Failure
                     await self._queue_service.put_task(t)
                 self._current_tasks = {
@@ -449,6 +453,7 @@ class Bot(Client):
                         )
                     if uid is not None and uid in self._current_tasks:
                         del self._current_tasks[uid]
+                    await asyncio.sleep(10)
                     return
                 elif outc == DispatchOutcome.Abort:
                     return
@@ -542,6 +547,11 @@ class Bot(Client):
                         self._logger.exception(ex)
                 return DispatchOutcome.Continue
 
+            elif (
+                "concurrent job" in embed.description
+                or "Your job queue is full" in embed.description
+            ):
+                return DispatchOutcome.Retry
             elif (
                 "third-party" in embed.description
                 and "acknowledge" in embed.description
@@ -739,24 +749,26 @@ class Bot(Client):
             kwargs = {}
             if self._proxy:
                 kwargs["proxy"] = "http://" + self._proxy
-            async with session.post(
-                self.url,
-                json=payload,
-                **kwargs,
-            ) as response:
-                if response.status > 299:
-                    self._logger.error(f"{self._bot_id}: {response}")
-                    text = await response.text()
-                    txt = f"Unexpected response {response.status} {text}"
+            for trial in range(3):
+                async with session.post(
+                    self.url,
+                    json=payload,
+                    **kwargs,
+                ) as response:
+                    if response.status > 299:
+                        self._logger.error(f"{self._bot_id}: {response}")
+                        text = await response.text()
+                        txt = f"Unexpected response {response.status} {text}"
 
-                    if response.status == 400:
-                        raise BadRequest(txt)
-                    elif response.status == 429:
-                        raise TooManyRequest(txt)
-                    elif response.status == 401:
-                        raise NotAuthorized(txt)
-                    raise GenericRequestError(txt)
-                return await response.text()
+                        if response.status == 400:
+                            raise BadRequest(txt)
+                        elif response.status == 429:
+                            await asyncio.sleep(5 * trial)
+                            continue
+                        elif response.status == 401:
+                            raise NotAuthorized(txt)
+                        raise GenericRequestError(txt)
+                    return await response.text()
 
     async def send_prompt(self, prompt: str):
         options = [{"type": 3, "name": "prompt", "value": prompt}]
