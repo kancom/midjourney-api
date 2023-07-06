@@ -67,7 +67,6 @@ class Bot(Client):
         channel_id: int
         server_id: int
         user_access_token: str
-        bot_access_token: str
         proxy: Optional[str] = None
         captcha_service: Any
 
@@ -78,7 +77,6 @@ class Bot(Client):
 
     url = "https://discord.com/api/v9/interactions"
     MJ_BOT_ID = 936929561302675456
-    max_proc_time: timedelta = timedelta(minutes=5)
     capacity = {True: 10, False: 1}
     progress_str = re.compile(r"\(([0-9]+)%\)")
     mode_str = re.compile(r"\(([a-z]+), ([a-z]+)\)")
@@ -107,7 +105,6 @@ class Bot(Client):
         self._channel_id = init_cont.channel_id
         self._server_id = init_cont.server_id
         self._user_access_token = init_cont.user_access_token
-        self._bot_access_token = init_cont.bot_access_token
         self._captcha_src = init_cont.captcha_service
         self._proxy = init_cont.proxy
         if self._proxy and self._proxy.count(":") == 3:
@@ -188,7 +185,7 @@ class Bot(Client):
                 ]
                 if len(ev):
                     # and not self._high_priority:
-                    self.max_task_age = timedelta(minutes=10)
+                    self.max_task_age = timedelta(minutes=15)
                     self._eviction_count += 1
                     self._logger.warning(ev)
                 for t in ev:
@@ -226,7 +223,9 @@ class Bot(Client):
                     )
                 )
 
-                if len(self._current_tasks) >= self.capacity[self._high_priority]:
+                if (len(self._current_tasks) >= self.capacity[self._high_priority]) or (
+                    self._info and self._info.queue > 0
+                ):
                     continue
 
                 cnt.QUEUE_LEN.labels(self._human_name, self._high_priority).set(
@@ -325,6 +324,9 @@ class Bot(Client):
             #     await self.set_fast_mode()
             await super().start(self._user_access_token)
         except asyncio.exceptions.CancelledError:
+            cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                Mode.Offline.value
+            )
             if t is not None:
                 t.cancel()
             self._logger.warning("cancelled")
@@ -409,6 +411,11 @@ class Bot(Client):
 
         try:
             self._logger.debug(f"{message.id},{message.content}, {message.attachments}")
+            # if there are some tasks @ mj bot's queue
+            if self._info and self._info.queue > 0 and len(message.attachments):
+                # this is a foreign task
+                self._info.queue -= 1
+
             await self._ensure_task(message)
             try:
                 uid = await self._queue_service.lookup_task_by_msg(message.id)
@@ -548,9 +555,11 @@ class Bot(Client):
                 return DispatchOutcome.Continue
 
             elif (
-                "concurrent job" in embed.description
-                or "Your job queue is full" in embed.description
+                "Your job queue is full" in embed.description
+                or "concurrent job" in embed.description
             ):
+                if self._info:
+                    self._info.queue += 1
                 return DispatchOutcome.Retry
             elif (
                 "third-party" in embed.description
@@ -568,18 +577,18 @@ class Bot(Client):
                 return DispatchOutcome.Retry
             elif "blocked" in embed.description and " ban " in embed.description:
                 self._offline = True
-                i_ = 25 * 60 * 60
+                i_ = timedelta(seconds=25 * 60 * 60)
                 s_ = embed.description.split(":")
                 if len(s_) > 1:
                     until = datetime.fromtimestamp(int(s_[1]))
-                    i_ = (until - datetime.utcnow()).total_seconds()
+                    i_ = until - datetime.utcnow()
                 msg_ = f"I was banned {embed.description}. Sleep for {i_}"
                 self._logger.error(msg_)
                 await self._send_tg_notification(msg_)
                 cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
                     Mode.Offline.value
                 )
-                await asyncio.sleep(i_)
+                await asyncio.sleep(i_.total_seconds())
                 self._offline = False
                 return DispatchOutcome.Retry
             elif (

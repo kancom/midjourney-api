@@ -46,11 +46,11 @@ class FileChangeHandler(FileSystemEventHandler):
                     channel_id=row["channel_id"],
                     server_id=row["server_id"],
                     user_access_token=row["user_access_token"],
-                    bot_access_token=row["bot_access_token"],
                     human_name=row["human_name"],
                     proxy=row.get("proxy"),
                     captcha_service=self._captcha_srv,
                 )
+
                 if container.bot_id in tasks:
                     if hash(container) == tasks[container.bot_id][0]:
                         del for_removal[for_removal.index(container.bot_id)]
