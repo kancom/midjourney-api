@@ -119,6 +119,7 @@ class Bot(Client):
         self.max_task_age = (
             timedelta(minutes=10) if self._high_priority else timedelta(minutes=13)
         )
+        self._loop = None
 
     @property
     def identity(self) -> str:
@@ -128,7 +129,7 @@ class Bot(Client):
         if (
             self._info is None
             or self._info.fast_hours == 0
-            and len(self._current_tasks) > 1
+            and len(self._current_tasks) > 0
         ):
             return
         rl = RouteLabel(priority=Priority.High, bot_pool=self._bot_pool)
@@ -144,7 +145,7 @@ class Bot(Client):
                 and high_tickets > high_len  # our capacity is enough
                 and high_tickets > 1  # one is spare (1 is self already)
             ):
-                self._logger.info(f"{self}: switching to assist to Normal queue")
+                self._logger.info("switching to assist to Normal queue")
                 self._high_priority = False
                 await self.send_setrelaxed_cmd()
         else:
@@ -155,9 +156,17 @@ class Bot(Client):
                 and self._info.fast_hours > self.min_fast_hours
                 # and normal_tickets > 0  # one is spare
             ):
-                self._logger.info(f"{self}: switching to assist to High queue")
+                self._logger.info("switching to assist to High queue")
                 self._high_priority = True
                 await self.send_setfast_cmd()
+
+    async def _recheck_info(self):
+        if not self._offline:
+            await self.send_info_cmd()
+        await asyncio.sleep(10 * 60)
+        if self._loop is None:
+            raise ValueError("loop is None")
+        self._loop.create_task(self._recheck_info())
 
     async def _worker(self):
         self._logger.info(f"Bot id {self._bot_id} worker starting")
@@ -169,6 +178,8 @@ class Bot(Client):
             await asyncio.sleep(5)
 
         await self.send_info_cmd()
+        self._loop = asyncio.get_running_loop()
+        self._loop.create_task(self._recheck_info())
         while True:
             try:
                 task_id = None
@@ -223,21 +234,20 @@ class Bot(Client):
                     )
                 )
 
-                if (len(self._current_tasks) >= self.capacity[self._high_priority]) or (
-                    self._info and self._info.queue > 0
-                ):
+                if len(self._current_tasks) >= self.capacity[self._high_priority]:
                     continue
 
                 cnt.QUEUE_LEN.labels(self._human_name, self._high_priority).set(
                     len(self._current_tasks)
                 )
-                if tasks_processed > 0 and tasks_processed % 10 == 0:
-                    await self.send_info_cmd()
-                    tasks_processed = 0
                 for _ in range(5):
                     if self._info is not None:
                         break
                     await asyncio.sleep(1)
+
+                if self._info and self._info.queue > 0:
+                    continue
+
                 for p, bot in itertools.product(Priority, (self._bot_id, None)):
                     if (
                         self._high_priority
@@ -308,6 +318,7 @@ class Bot(Client):
                         )
                     if task_id is not None and task_id in self._current_tasks:
                         del self._current_tasks[task_id]
+                    self._logger.debug(self._current_tasks)
                     await asyncio.sleep(30)
                     raise
             except Exception as ex:
@@ -485,7 +496,8 @@ class Bot(Client):
                 task.discord_msg_id = message.id
                 self._logger.debug(f"{uid}, {message.attachments[0].url}")
                 await self._queue_service.put_task(task)
-                del self._current_tasks[uid]
+                if uid in self._current_tasks:
+                    del self._current_tasks[uid]
                 cnt.SUCCEED.labels(self._human_name).inc()
                 self._logger.info(len(self._current_tasks))
             self._eviction_count = 0
@@ -511,7 +523,8 @@ class Bot(Client):
             mode=mode,
             queue=queue,
             fast_hours=3600 * fast_hours,
-            active="Paused" not in d["Subscription"],
+            active="Paused" not in d["Subscription"]
+            and "Inactive" not in d["Subscription"],
         )
 
     async def _send_tg_notification(self, text):
@@ -528,6 +541,10 @@ class Bot(Client):
             async with session.post(url, json=payload) as response:
                 if response.status > 299:
                     self._logger.error("failed to notify")
+
+    async def _delayed_awake(self, delay: float):
+        await asyncio.sleep(delay)
+        self._offline = False
 
     async def _dispatch_embed(
         self, embed: discord.Embed, msg: Message
@@ -588,8 +605,8 @@ class Bot(Client):
                 cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
                     Mode.Offline.value
                 )
-                await asyncio.sleep(i_.total_seconds())
-                self._offline = False
+                if self._loop:
+                    self._loop.create_task(self._delayed_awake(i_.total_seconds()))
                 return DispatchOutcome.Retry
             elif (
                 "billing" in embed.description
@@ -605,8 +622,18 @@ class Bot(Client):
                 await self._send_tg_notification(msg_)
                 return DispatchOutcome.Retry
             elif "run out of hours" in embed.description:
-                self._high_priority = False
-                await self.send_setrelaxed_cmd()
+                if self._high_priority:
+                    self._high_priority = False
+                    await self.send_setrelaxed_cmd()
+                else:
+                    self._offline = True
+                    msg_ = embed.description
+                    self._logger.error(msg_)
+                    cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                        Mode.Offline.value
+                    )
+                    await self._send_tg_notification(msg_)
+
                 return DispatchOutcome.Retry
 
         await self._ensure_task(msg)
@@ -628,6 +655,7 @@ class Bot(Client):
         task.status = Outcome.Failure
         task.progress = 0
         task.error = embed.description
+        self._logger.debug(task)
         await self._queue_service.put_task(task)
         del self._current_tasks[uid]
         self._logger.info(len(self._current_tasks))
@@ -772,7 +800,7 @@ class Bot(Client):
                         if response.status == 400:
                             raise BadRequest(txt)
                         elif response.status == 429:
-                            await asyncio.sleep(5 * trial)
+                            await asyncio.sleep(5 * trial + 1)
                             continue
                         elif response.status == 401:
                             raise NotAuthorized(txt)
@@ -824,7 +852,9 @@ class Bot(Client):
         self, img_idx: int, dscrd_msg_id: int, dscrd_img_nm: str
     ):
         f_name = dscrd_img_nm.split("_")[-1].split(".")[0]
-        custom_id = "MJ::JOB::variation::{}::{}".format(img_idx, f_name)
+        custom_id = "MJ::JOB::variation::{}::{}".format(
+            img_idx, f_name.split(".")[0][-36:]
+        )
         return await self._press_btn(dscrd_msg_id, custom_id)
 
     async def _press_btn(self, dscrd_msg_id: int, custom_id: str, flags: int = 0):
