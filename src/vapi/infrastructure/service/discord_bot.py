@@ -122,10 +122,33 @@ class Bot(Client):
         self.max_task_age = (
             timedelta(minutes=10) if self._high_priority else timedelta(minutes=13)
         )
+        self.app_commands_data: dict = {}
 
     @property
     def identity(self) -> str:
         return self._human_name or str(self._bot_id)
+
+    async def get_data_from_midjourney(self) -> dict:
+        url = "https://discord.com/api/v9/channels/1008571141507534928/application-commands/search?type=1&limit=25&include_applications=true"
+        headers = {"Authorization": self._user_access_token}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url) as response:
+                raw_data = await response.json()
+                return raw_data.get("application_commands")
+
+    def extract_initial_values(data_list: list, description: str) -> dict:
+        for idx in range(len(data_list)):
+            if data_list[idx]["description"] == description:
+                return {
+                    "application_id": data_list[idx]["application_id"],
+                    "version": data_list[idx]["version"],
+                    "id": data_list[idx]["id"],
+                }
+        return {
+            "application_id": "936929561302675456",
+            "version": "1118961510123847772",
+            "id": "938956540159881230",
+        }
 
     async def _assist_2peers(self):
         if (
@@ -314,6 +337,7 @@ class Bot(Client):
 
     async def start(self):
         t = None
+        self.app_commands_data = await self.get_data_from_midjourney(self)
         try:
             t = asyncio.create_task(self._worker())
             self._logger.info(f"Bot id {self._bot_id} discord coroutine starting")
@@ -760,30 +784,32 @@ class Bot(Client):
 
     async def send_prompt(self, prompt: str):
         options = [{"type": 3, "name": "prompt", "value": prompt}]
+        description = "Create images with Midjourney"
+        values = await self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": "936929561302675456",
+            "application_id": values.get("application_id"),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
-                "version": "1118961510123847772",
+                "version": values.get("version"),
                 # "version": "1077969938624553050",
-                "id": "938956540159881230",
+                "id": values.get("id"),
                 "name": "imagine",
                 "type": 1,
                 "options": options,
                 "application_command": {
-                    "id": "938956540159881230",
-                    "application_id": "936929561302675456",
-                    "version": "1118961510123847772",
+                    "id": values.get("id"),
+                    "application_id": values.get("application_id"),
+                    "version": values.get("version"),
                     "default_permission": True,
                     "default_member_permissions": None,
                     "type": 1,
                     "nsfw": False,
                     "name": "imagine",
-                    "description": "Create images with Midjourney",
+                    "description": description,
                     "dm_permission": True,
                     "options": [
                         {
@@ -1094,3 +1120,7 @@ class Bot(Client):
 #     "repaired": false
 #   }
 # }
+
+
+if __name__ == "__main__":
+    asyncio.run(Bot.start(Bot))

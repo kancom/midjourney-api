@@ -37,7 +37,7 @@ uvicorn = "*"
 pytest-asyncio = "*"
 pytest = "==7.1.2"
 pytest-mock = "*"
-black = "==22.10.0"
+black = "==23.7.0"
 # for mypy checking (python 3.4+ is needed)
 pyls-mypy="*"
 # pyls-isort Isort import sort code formatting
