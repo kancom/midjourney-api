@@ -109,3 +109,5 @@ Dockerfile-dev
 .DS_Store
 .envrc
 
+discord_ids.csv
+/src/vapi/infrastructure/service/temp.py

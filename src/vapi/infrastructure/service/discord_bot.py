@@ -136,6 +136,7 @@ class Bot(Client):
                 raw_data = await response.json()
                 return raw_data.get("application_commands")
 
+    @staticmethod
     def extract_initial_values(data_list: list, description: str) -> dict:
         for idx in range(len(data_list)):
             if data_list[idx]["description"] == description:
@@ -144,11 +145,6 @@ class Bot(Client):
                     "version": data_list[idx]["version"],
                     "id": data_list[idx]["id"],
                 }
-        return {
-            "application_id": "936929561302675456",
-            "version": "1118961510123847772",
-            "id": "938956540159881230",
-        }
 
     async def _assist_2peers(self):
         if (
@@ -785,25 +781,31 @@ class Bot(Client):
     async def send_prompt(self, prompt: str):
         options = [{"type": 3, "name": "prompt", "value": prompt}]
         description = "Create images with Midjourney"
-        values = await self.extract_initial_values(self.app_commands_data, description)
+        values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": values.get("application_id"),
+            "application_id": values.get(
+                "application_id",
+                "936929561302675456"
+            ),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
-                "version": values.get("version"),
+                "version": values.get("version", "1118961510123847772"),
                 # "version": "1077969938624553050",
-                "id": values.get("id"),
+                "id": values.get("id", "938956540159881230"),
                 "name": "imagine",
                 "type": 1,
                 "options": options,
                 "application_command": {
-                    "id": values.get("id"),
-                    "application_id": values.get("application_id"),
-                    "version": values.get("version"),
+                    "id": values.get("id", "938956540159881230"),
+                    "application_id": values.get(
+                        "application_id",
+                        "936929561302675456"
+                    ),
+                    "version": values.get("version", "1118961510123847772"),
                     "default_permission": True,
                     "default_member_permissions": None,
                     "type": 1,
@@ -850,28 +852,36 @@ class Bot(Client):
         return await self._send_req(payload)
 
     async def send_info_cmd(self):
+        description = "View information about your profile."
+        values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": "936929561302675456",
+            "application_id": values.get(
+                "application_id",
+                "936929561302675456"
+            ),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
-                "version": "1118961510123847776",
-                "id": "972289487818334209",
+                "version": values.get("version", "1118961510123847776"),
+                "id": values.get("id"), #"972289487818334209",
                 "name": "info",
                 "type": 1,
                 "options": [],
                 "application_command": {
-                    "id": "972289487818334209",
-                    "application_id": "936929561302675456",
-                    "version": "1118961510123847776",
+                    "id": values.get("id", "972289487818334209"),
+                    "application_id": values.get(
+                        "application_id",
+                        "936929561302675456"
+                    ),
+                    "version": values.get("version", "1118961510123847776"),
                     "default_member_permissions": None,
                     "type": 1,
                     "nsfw": False,
                     "name": "info",
-                    "description": "View information about your profile.",
+                    "description": description,
                     "dm_permission": True,
                     "contexts": None,
                 },
@@ -882,28 +892,36 @@ class Bot(Client):
         return await self._send_req(payload)
 
     async def send_setfast_cmd(self):
+        description = "Switch to fast mode"
+        values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": "936929561302675456",
+            "application_id": values.get(
+                "application_id",
+                "936929561302675456"
+            ),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
             "data": {
-                "version": "987795926183731231",
-                "id": "972289487818334212",
+                "version": values.get("version", "987795926183731231"),
+                "id": values.get("id", "972289487818334212"),
                 "name": "fast",
                 "type": 1,
                 "options": [],
                 "application_command": {
-                    "id": "972289487818334212",
-                    "application_id": "936929561302675456",
-                    "version": "987795926183731231",
+                    "id": values.get("id", "972289487818334212"),
+                    "application_id": values.get(
+                        "application_id",
+                        "936929561302675456"
+                    ),
+                    "version": values.get("version", "987795926183731231"),
                     "default_member_permissions": None,
                     "type": 1,
                     "nsfw": False,
                     "name": "fast",
-                    "description": "Switch to fast mode",
+                    "description": description,
                     "dm_permission": False,
                 },
                 "attachments": [],
@@ -912,28 +930,36 @@ class Bot(Client):
         return await self._send_req(payload)
 
     async def send_setrelaxed_cmd(self):
+        description = "Switch to relax mode"
+        values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": "936929561302675456",
+            "application_id": values.get(
+                "application_id",
+                "936929561302675456"
+            ),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "adbb78aa583b20f4e58f2ef23ce89774",
             "data": {
-                "version": "987795926183731232",
-                "id": "972289487818334213",
+                "version": values.get("version", "987795926183731232"),
+                "id": values.get("id", "972289487818334213"),
                 "name": "relax",
                 "type": 1,
                 "options": [],
                 "application_command": {
-                    "id": "972289487818334213",
-                    "application_id": "936929561302675456",
-                    "version": "987795926183731232",
+                    "id": values.get("id", "972289487818334213"),
+                    "application_id": values.get(
+                        "application_id",
+                        "936929561302675456"
+                    ),
+                    "version": values.get("version", "987795926183731232"),
                     "default_member_permissions": None,
                     "type": 1,
                     "nsfw": False,
                     "name": "relax",
-                    "description": "Switch to relax mode",
+                    "description": description,
                     "dm_permission": False,
                 },
                 "attachments": [],
@@ -1120,7 +1146,3 @@ class Bot(Client):
 #     "repaired": false
 #   }
 # }
-
-
-if __name__ == "__main__":
-    asyncio.run(Bot.start(Bot))
