@@ -316,6 +316,10 @@ class Bot(Client):
                         await self._queue_service.push_back_task_id(
                             str(task.uuid), task.route_label
                         )
+                    else:
+                        # if variations fails on the origin bot - no other options
+                        task.status = Outcome.Failure
+                        await self._queue_service.put_task(task)
                     if task_id is not None and task_id in self._current_tasks:
                         del self._current_tasks[task_id]
                     self._logger.debug(self._current_tasks)
