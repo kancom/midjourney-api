@@ -128,7 +128,7 @@ class Bot(Client):
 
     async def get_data_from_midjourney(self) -> dict:
         url = "https://discord.com/api/v9/channels/1008571141507534928/application-commands/search?type=1&limit=25&include_applications=true"
-        headers = {"Authorization": "MTA1Njg1MDA1NDM3MzE4MzUyOA.G7ir-4.g99a8tsRDsnEN7u_sFHb_dseD8m0luxRAxtnco"} #self._user_access_token}
+        headers = {"Authorization": self._user_access_token}
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url) as response:
                 raw_data = await response.json()
