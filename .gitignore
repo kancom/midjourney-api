@@ -110,4 +110,3 @@ Dockerfile-dev
 .envrc
 
 discord_ids.csv
-Pipfile.lock
