@@ -15,8 +15,8 @@ from discord import Client
 from discord.message import Message
 from loguru import logger
 from pydantic import BaseModel
-from vapi.application import (Command, IQueueService, Outcome, Priority,
-                              RouteLabel, TaskDeliverable)
+from vapi.application import (Command, IQueueService, NotInCollection, Outcome,
+                              Priority, RouteLabel, TaskDeliverable)
 from vapi.application.domain.task import GenerateTask, VariationTask
 
 logger.remove()
@@ -67,7 +67,6 @@ class Bot(Client):
         channel_id: int
         server_id: int
         user_access_token: str
-        bot_access_token: str
         proxy: Optional[str] = None
         captcha_service: Any
 
@@ -78,7 +77,6 @@ class Bot(Client):
 
     url = "https://discord.com/api/v9/interactions"
     MJ_BOT_ID = 936929561302675456
-    max_proc_time: timedelta = timedelta(minutes=5)
     capacity = {True: 10, False: 1}
     progress_str = re.compile(r"\(([0-9]+)%\)")
     mode_str = re.compile(r"\(([a-z]+), ([a-z]+)\)")
@@ -107,7 +105,6 @@ class Bot(Client):
         self._channel_id = init_cont.channel_id
         self._server_id = init_cont.server_id
         self._user_access_token = init_cont.user_access_token
-        self._bot_access_token = init_cont.bot_access_token
         self._captcha_src = init_cont.captcha_service
         self._proxy = init_cont.proxy
         if self._proxy and self._proxy.count(":") == 3:
@@ -122,6 +119,7 @@ class Bot(Client):
         self.max_task_age = (
             timedelta(minutes=10) if self._high_priority else timedelta(minutes=13)
         )
+        self._loop = None
         self.app_commands_data: dict = {}
 
     @property
@@ -150,7 +148,7 @@ class Bot(Client):
         if (
             self._info is None
             or self._info.fast_hours == 0
-            and len(self._current_tasks) > 1
+            and len(self._current_tasks) > 0
         ):
             return
         rl = RouteLabel(priority=Priority.High, bot_pool=self._bot_pool)
@@ -164,9 +162,9 @@ class Bot(Client):
             if (
                 normal_len > normal_tickets  # peer's len's too long
                 and high_tickets > high_len  # our capacity is enough
-                and high_tickets > 0  # one is spare
+                and high_tickets > 1  # one is spare (1 is self already)
             ):
-                self._logger.info(f"{self}: switching to assist to Normal queue")
+                self._logger.info("switching to assist to Normal queue")
                 self._high_priority = False
                 await self.send_setrelaxed_cmd()
         else:
@@ -175,11 +173,19 @@ class Bot(Client):
                 high_len > high_tickets
                 and normal_tickets > normal_len
                 and self._info.fast_hours > self.min_fast_hours
-                and normal_tickets > 0  # one is spare
+                # and normal_tickets > 0  # one is spare
             ):
-                self._logger.info(f"{self}: switching to assist to High queue")
+                self._logger.info("switching to assist to High queue")
                 self._high_priority = True
                 await self.send_setfast_cmd()
+
+    async def _recheck_info(self):
+        if not self._offline:
+            await self.send_info_cmd()
+        await asyncio.sleep(10 * 60)
+        if self._loop is None:
+            raise ValueError("loop is None")
+        self._loop.create_task(self._recheck_info())
 
     async def _worker(self):
         self._logger.info(f"Bot id {self._bot_id} worker starting")
@@ -191,6 +197,8 @@ class Bot(Client):
             await asyncio.sleep(5)
 
         await self.send_info_cmd()
+        self._loop = asyncio.get_running_loop()
+        self._loop.create_task(self._recheck_info())
         while True:
             try:
                 task_id = None
@@ -207,14 +215,18 @@ class Bot(Client):
                 ]
                 if len(ev):
                     # and not self._high_priority:
-                    self.max_task_age = timedelta(minutes=10)
+                    self.max_task_age = timedelta(minutes=15)
                     self._eviction_count += 1
                     self._logger.warning(ev)
                 for t in ev:
                     cnt.REQ_ERROR.labels(
                         self._human_name, "generic", "TaskEviction"
                     ).inc()
-                    t = await self._queue_service.get_task_by_id(t)
+                    try:
+                        t = await self._queue_service.get_task_by_id(t)
+                    except NotInCollection:
+                        # already expired
+                        break
                     t.status = Outcome.Failure
                     await self._queue_service.put_task(t)
                 self._current_tasks = {
@@ -247,13 +259,14 @@ class Bot(Client):
                 cnt.QUEUE_LEN.labels(self._human_name, self._high_priority).set(
                     len(self._current_tasks)
                 )
-                if tasks_processed > 0 and tasks_processed % 10 == 0:
-                    await self.send_info_cmd()
-                    tasks_processed = 0
                 for _ in range(5):
                     if self._info is not None:
                         break
                     await asyncio.sleep(1)
+
+                if self._info and self._info.queue > 0:
+                    continue
+
                 for p, bot in itertools.product(Priority, (self._bot_id, None)):
                     if (
                         self._high_priority
@@ -324,6 +337,7 @@ class Bot(Client):
                         )
                     if task_id is not None and task_id in self._current_tasks:
                         del self._current_tasks[task_id]
+                    self._logger.debug(self._current_tasks)
                     await asyncio.sleep(30)
                     raise
             except Exception as ex:
@@ -341,6 +355,9 @@ class Bot(Client):
             #     await self.set_fast_mode()
             await super().start(self._user_access_token)
         except asyncio.exceptions.CancelledError:
+            cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                Mode.Offline.value
+            )
             if t is not None:
                 t.cancel()
             self._logger.warning("cancelled")
@@ -425,6 +442,11 @@ class Bot(Client):
 
         try:
             self._logger.debug(f"{message.id},{message.content}, {message.attachments}")
+            # if there are some tasks @ mj bot's queue
+            if self._info and self._info.queue > 0 and len(message.attachments):
+                # this is a foreign task
+                self._info.queue -= 1
+
             await self._ensure_task(message)
             try:
                 uid = await self._queue_service.lookup_task_by_msg(message.id)
@@ -469,6 +491,7 @@ class Bot(Client):
                         )
                     if uid is not None and uid in self._current_tasks:
                         del self._current_tasks[uid]
+                    await asyncio.sleep(10)
                     return
                 elif outc == DispatchOutcome.Abort:
                     return
@@ -493,7 +516,8 @@ class Bot(Client):
                 task.discord_msg_id = message.id
                 self._logger.debug(f"{uid}, {message.attachments[0].url}")
                 await self._queue_service.put_task(task)
-                del self._current_tasks[uid]
+                if uid in self._current_tasks:
+                    del self._current_tasks[uid]
                 cnt.SUCCEED.labels(self._human_name).inc()
                 self._logger.info(len(self._current_tasks))
             self._eviction_count = 0
@@ -519,7 +543,8 @@ class Bot(Client):
             mode=mode,
             queue=queue,
             fast_hours=3600 * fast_hours,
-            active="Paused" not in d["Subscription"],
+            active="Paused" not in d["Subscription"]
+            and "Inactive" not in d["Subscription"],
         )
 
     async def _send_tg_notification(self, text):
@@ -536,6 +561,10 @@ class Bot(Client):
             async with session.post(url, json=payload) as response:
                 if response.status > 299:
                     self._logger.error("failed to notify")
+
+    async def _delayed_awake(self, delay: float):
+        await asyncio.sleep(delay)
+        self._offline = False
 
     async def _dispatch_embed(
         self, embed: discord.Embed, msg: Message
@@ -563,6 +592,13 @@ class Bot(Client):
                 return DispatchOutcome.Continue
 
             elif (
+                "Your job queue is full" in embed.description
+                or "concurrent job" in embed.description
+            ):
+                if self._info:
+                    self._info.queue += 1
+                return DispatchOutcome.Retry
+            elif (
                 "third-party" in embed.description
                 and "acknowledge" in embed.description
             ):
@@ -578,19 +614,19 @@ class Bot(Client):
                 return DispatchOutcome.Retry
             elif "blocked" in embed.description and " ban " in embed.description:
                 self._offline = True
-                i_ = 25 * 60 * 60
+                i_ = timedelta(seconds=25 * 60 * 60)
                 s_ = embed.description.split(":")
                 if len(s_) > 1:
                     until = datetime.fromtimestamp(int(s_[1]))
-                    i_ = (until - datetime.utcnow()).total_seconds()
+                    i_ = until - datetime.utcnow()
                 msg_ = f"I was banned {embed.description}. Sleep for {i_}"
                 self._logger.error(msg_)
                 await self._send_tg_notification(msg_)
                 cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
                     Mode.Offline.value
                 )
-                await asyncio.sleep(i_)
-                self._offline = False
+                if self._loop:
+                    self._loop.create_task(self._delayed_awake(i_.total_seconds()))
                 return DispatchOutcome.Retry
             elif (
                 "billing" in embed.description
@@ -606,8 +642,18 @@ class Bot(Client):
                 await self._send_tg_notification(msg_)
                 return DispatchOutcome.Retry
             elif "run out of hours" in embed.description:
-                self._high_priority = False
-                await self.send_setrelaxed_cmd()
+                if self._high_priority:
+                    self._high_priority = False
+                    await self.send_setrelaxed_cmd()
+                else:
+                    self._offline = True
+                    msg_ = embed.description
+                    self._logger.error(msg_)
+                    cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
+                        Mode.Offline.value
+                    )
+                    await self._send_tg_notification(msg_)
+
                 return DispatchOutcome.Retry
 
         await self._ensure_task(msg)
@@ -629,6 +675,7 @@ class Bot(Client):
         task.status = Outcome.Failure
         task.progress = 0
         task.error = embed.description
+        self._logger.debug(task)
         await self._queue_service.put_task(task)
         del self._current_tasks[uid]
         self._logger.info(len(self._current_tasks))
@@ -759,24 +806,26 @@ class Bot(Client):
             kwargs = {}
             if self._proxy:
                 kwargs["proxy"] = "http://" + self._proxy
-            async with session.post(
-                self.url,
-                json=payload,
-                **kwargs,
-            ) as response:
-                if response.status > 299:
-                    self._logger.error(f"{self._bot_id}: {response}")
-                    text = await response.text()
-                    txt = f"Unexpected response {response.status} {text}"
+            for trial in range(3):
+                async with session.post(
+                    self.url,
+                    json=payload,
+                    **kwargs,
+                ) as response:
+                    if response.status > 299:
+                        self._logger.error(f"{self._bot_id}: {response}")
+                        text = await response.text()
+                        txt = f"Unexpected response {response.status} {text}"
 
-                    if response.status == 400:
-                        raise BadRequest(txt)
-                    elif response.status == 429:
-                        raise TooManyRequest(txt)
-                    elif response.status == 401:
-                        raise NotAuthorized(txt)
-                    raise GenericRequestError(txt)
-                return await response.text()
+                        if response.status == 400:
+                            raise BadRequest(txt)
+                        elif response.status == 429:
+                            await asyncio.sleep(5 * trial + 1)
+                            continue
+                        elif response.status == 401:
+                            raise NotAuthorized(txt)
+                        raise GenericRequestError(txt)
+                    return await response.text()
 
     async def send_prompt(self, prompt: str):
         options = [{"type": 3, "name": "prompt", "value": prompt}]
@@ -831,7 +880,9 @@ class Bot(Client):
         self, img_idx: int, dscrd_msg_id: int, dscrd_img_nm: str
     ):
         f_name = dscrd_img_nm.split("_")[-1].split(".")[0]
-        custom_id = "MJ::JOB::variation::{}::{}".format(img_idx, f_name)
+        custom_id = "MJ::JOB::variation::{}::{}".format(
+            img_idx, f_name.split(".")[0][-36:]
+        )
         return await self._press_btn(dscrd_msg_id, custom_id)
 
     async def _press_btn(self, dscrd_msg_id: int, custom_id: str, flags: int = 0):
