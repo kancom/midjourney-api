@@ -127,12 +127,15 @@ class Bot(Client):
         return self._human_name or str(self._bot_id)
 
     async def get_data_from_midjourney(self) -> dict:
-        url = "https://discord.com/api/v9/channels/1008571141507534928/application-commands/search?type=1&limit=25&include_applications=true"
+        url = f"https://discord.com/api/v9/channels/{self._channel_id}/application-commands/search?type=1&limit=25&include_applications=true"
         headers = {"Authorization": self._user_access_token}
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url) as response:
-                raw_data = await response.json()
-                return raw_data.get("application_commands")
+                try:
+                    raw_data = await response.json()
+                    return raw_data.get("application_commands")
+                except:
+                    pass
 
     @staticmethod
     def extract_initial_values(data_list: list, description: str) -> dict:
