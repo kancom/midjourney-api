@@ -110,4 +110,4 @@ Dockerfile-dev
 .envrc
 
 discord_ids.csv
-/src/vapi/infrastructure/service/temp.py
+Pipfile.lock
