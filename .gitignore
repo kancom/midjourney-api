@@ -109,3 +109,4 @@ Dockerfile-dev
 .DS_Store
 .envrc
 
+discord_ids.csv
