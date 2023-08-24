@@ -42,7 +42,6 @@ class FileChangeHandler(FileSystemEventHandler):
                 container = Bot.BotInitCont(
                     bot_id=row["id"],
                     bot_pool=row.get("pool", "common"),
-                    high_priority=row["high_priority"],
                     channel_id=row["channel_id"],
                     server_id=row["server_id"],
                     user_access_token=row["user_access_token"],

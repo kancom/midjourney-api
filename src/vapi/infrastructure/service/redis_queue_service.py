@@ -33,6 +33,8 @@ class RedisQueueRepo(RedisVolatileRepo, IQueueService):
     async def get_next_task_id(self, route_label: RouteLabel) -> Optional[UUID]:
         q_nm = self._get_q_name_by_prior(route_label)
         c = await self._redis.rpop(q_nm)
+        length = await self._redis.llen(q_nm)
+        cnt.INC_QUEUE_LEN.labels(q_nm).set(length)
         if c is not None:
             return UUID(c)
 
@@ -43,8 +45,7 @@ class RedisQueueRepo(RedisVolatileRepo, IQueueService):
 
     async def publish_task(self, uid: UUID, route_label: RouteLabel):
         q_nm = self._get_q_name_by_prior(route_label)
-        await self._redis.lpush(q_nm, str(uid))
-        length = await self._redis.llen(q_nm)
+        length = await self._redis.lpush(q_nm, str(uid))
         cnt.INC_QUEUE_LEN.labels(q_nm).set(length)
 
     async def del_task_by_id(self, uid: UUID):

@@ -63,7 +63,6 @@ class Bot(Client):
         bot_id: int
         bot_pool: str
         human_name: str
-        high_priority: bool = False
         channel_id: int
         server_id: int
         user_access_token: str
@@ -94,14 +93,11 @@ class Bot(Client):
         queue_service: IQueueService,
         **options: Any,
     ) -> None:
-        super().__init__(
-            # intents=Intents.all(),
-            **options
-        )
+        super().__init__(**options)
         self._bot_id = init_cont.bot_id
         self._bot_pool = init_cont.bot_pool
         self._human_name = init_cont.human_name
-        self._high_priority = init_cont.high_priority
+        self._high_priority = False
         self._channel_id = init_cont.channel_id
         self._server_id = init_cont.server_id
         self._user_access_token = init_cont.user_access_token
@@ -183,9 +179,9 @@ class Bot(Client):
                 await self.send_setfast_cmd()
 
     async def _recheck_info(self):
+        await asyncio.sleep(10 * 60)
         if not self._offline:
             await self.send_info_cmd()
-        await asyncio.sleep(10 * 60)
         if self._loop is None:
             raise ValueError("loop is None")
         self._loop.create_task(self._recheck_info())
@@ -218,7 +214,7 @@ class Bot(Client):
                 ]
                 if len(ev):
                     # and not self._high_priority:
-                    self.max_task_age = timedelta(minutes=15)
+                    self.max_task_age = timedelta(minutes=30)
                     self._eviction_count += 1
                     self._logger.warning(ev)
                 for t in ev:
@@ -272,7 +268,8 @@ class Bot(Client):
 
                 for p, bot in itertools.product(Priority, (self._bot_id, None)):
                     if (
-                        self._high_priority
+                        bot is None  # don't skip dedicated tasks
+                        and self._high_priority
                         and p in (Priority.Low, Priority.Normal)
                         # ) or (
                         #     not self._high_priority and p in (Priority.VIP, Priority.High)
@@ -358,8 +355,6 @@ class Bot(Client):
         try:
             t = asyncio.create_task(self._worker())
             self._logger.info(f"Bot id {self._bot_id} discord coroutine starting")
-            # if self._high_priority:
-            #     await self.set_fast_mode()
             await super().start(self._user_access_token)
         except asyncio.exceptions.CancelledError:
             cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
@@ -496,6 +491,11 @@ class Bot(Client):
                         await self._queue_service.push_back_task_id(
                             str(task.uuid), task.route_label
                         )
+                    else:
+                        task.status = Outcome.Failure
+                        task.error = "bot banned"
+                        await self._queue_service.put_task(task)
+
                     if uid is not None and uid in self._current_tasks:
                         del self._current_tasks[uid]
                     await asyncio.sleep(10)
@@ -509,7 +509,11 @@ class Bot(Client):
                 task.progress = 0
                 task.discord_msg_id = message.id
                 await self._queue_service.put_task(task)
-            if "Open on website" in message.content or len(message.attachments):
+            elif (
+                "Open on website" in message.content
+                or len(message.attachments)
+                and len(message.attachments[0].filename)
+            ):
                 cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
                     Mode.Fast.value if self._high_priority else Mode.Relaxed.value
                 )
@@ -521,7 +525,9 @@ class Bot(Client):
                     filename=message.attachments[0].filename,
                 )
                 task.discord_msg_id = message.id
-                self._logger.debug(f"{uid}, {message.attachments[0].url}")
+                self._logger.debug(
+                    f"{uid}, {message.attachments[0].url} {message.attachments[0].filename}"
+                )
                 await self._queue_service.put_task(task)
                 if uid in self._current_tasks:
                     del self._current_tasks[uid]
@@ -606,9 +612,8 @@ class Bot(Client):
                     self._info.queue += 1
                 return DispatchOutcome.Retry
             elif (
-                "third-party" in embed.description
-                and "acknowledge" in embed.description
-            ):
+                "third-party" in embed.description or "moderation" in embed.description
+            ) and "acknowledge" in embed.description:
                 labels = {
                     c.label: c.custom_id
                     for c in msg.components[0].children
@@ -619,21 +624,23 @@ class Bot(Client):
                 else:
                     self._logger.error(f"can't find Ack {msg.components[0].children}")
                 return DispatchOutcome.Retry
-            elif "blocked" in embed.description and " ban " in embed.description:
+            elif "blocked" in embed.description:
                 self._offline = True
-                i_ = timedelta(seconds=25 * 60 * 60)
-                s_ = embed.description.split(":")
-                if len(s_) > 1:
-                    until = datetime.fromtimestamp(int(s_[1]))
-                    i_ = until - datetime.utcnow()
-                msg_ = f"I was banned {embed.description}. Sleep for {i_}"
-                self._logger.error(msg_)
+                msg_ = f"I was banned {embed.description}."
+                if " ban " in embed.description:
+                    i_ = timedelta(seconds=25 * 60 * 60)
+                    s_ = embed.description.split(":")
+                    if len(s_) > 1:
+                        until = datetime.fromtimestamp(int(s_[1]))
+                        i_ = until - datetime.utcnow()
+                    msg_ = f"I was banned {embed.description}. Sleep for {i_}"
+                    self._logger.error(msg_)
+                    if self._loop:
+                        self._loop.create_task(self._delayed_awake(i_.total_seconds()))
                 await self._send_tg_notification(msg_)
                 cnt.BOT_STATE.labels(self._human_name, self._bot_pool).set(
                     Mode.Offline.value
                 )
-                if self._loop:
-                    self._loop.create_task(self._delayed_awake(i_.total_seconds()))
                 return DispatchOutcome.Retry
             elif (
                 "billing" in embed.description
@@ -840,10 +847,7 @@ class Bot(Client):
         values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": values.get(
-                "application_id",
-                "936929561302675456"
-            ),
+            "application_id": values.get("application_id", "936929561302675456"),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
@@ -858,8 +862,7 @@ class Bot(Client):
                 "application_command": {
                     "id": values.get("id", "938956540159881230"),
                     "application_id": values.get(
-                        "application_id",
-                        "936929561302675456"
+                        "application_id", "936929561302675456"
                     ),
                     "version": values.get("version", "1118961510123847772"),
                     "default_permission": True,
@@ -914,25 +917,21 @@ class Bot(Client):
         values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": values.get(
-                "application_id",
-                "936929561302675456"
-            ),
+            "application_id": values.get("application_id", "936929561302675456"),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
             # "session_id": "2fb980f65e5c9a77c96ca01f2c242cf6",
             "data": {
                 "version": values.get("version", "1118961510123847776"),
-                "id": values.get("id"), #"972289487818334209",
+                "id": values.get("id"),  # "972289487818334209",
                 "name": "info",
                 "type": 1,
                 "options": [],
                 "application_command": {
                     "id": values.get("id", "972289487818334209"),
                     "application_id": values.get(
-                        "application_id",
-                        "936929561302675456"
+                        "application_id", "936929561302675456"
                     ),
                     "version": values.get("version", "1118961510123847776"),
                     "default_member_permissions": None,
@@ -954,10 +953,7 @@ class Bot(Client):
         values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": values.get(
-                "application_id",
-                "936929561302675456"
-            ),
+            "application_id": values.get("application_id", "936929561302675456"),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
@@ -971,8 +967,7 @@ class Bot(Client):
                 "application_command": {
                     "id": values.get("id", "972289487818334212"),
                     "application_id": values.get(
-                        "application_id",
-                        "936929561302675456"
+                        "application_id", "936929561302675456"
                     ),
                     "version": values.get("version", "987795926183731231"),
                     "default_member_permissions": None,
@@ -992,10 +987,7 @@ class Bot(Client):
         values = self.extract_initial_values(self.app_commands_data, description)
         payload = {
             "type": 2,
-            "application_id": values.get(
-                "application_id",
-                "936929561302675456"
-            ),
+            "application_id": values.get("application_id", "936929561302675456"),
             "guild_id": self._server_id,
             "channel_id": self._channel_id,
             "session_id": self.ws.session_id,
@@ -1009,8 +1001,7 @@ class Bot(Client):
                 "application_command": {
                     "id": values.get("id", "972289487818334213"),
                     "application_id": values.get(
-                        "application_id",
-                        "936929561302675456"
+                        "application_id", "936929561302675456"
                     ),
                     "version": values.get("version", "987795926183731232"),
                     "default_member_permissions": None,
